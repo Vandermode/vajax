@@ -1,4 +1,5 @@
 import os
+import re
 
 from .exc import ConverterError
 from .patterns import *
@@ -61,7 +62,10 @@ class FileLoaderMixin:
                 l = " ".join(mp[:3] + [stripped])
 
         # Remove spaces from within paired parentheses
-        l = remove_paired_parentheses_spaces(l)
+        # Whitespace separates numeric coordinates in an independent voltage source.
+        # Compacting them here would make unitless adjacent values indistinguishable.
+        if not re.match(r"^v\S*\s+\S+\s+\S+\s+pwl\b", l, re.IGNORECASE):
+            l = remove_paired_parentheses_spaces(l)
 
         # Check if this is a toplevel circuit
         if self.cfg["as_toplevel"] == "auto":

@@ -1,4 +1,9 @@
+import math
 import re
+
+from vajax.utils.safe_eval import parse_spice_number
+
+from .exc import ConverterError
 
 
 class InstanceVMixin:
@@ -14,7 +19,7 @@ class InstanceVMixin:
 
         VACASK format:
             vname (n+ n-) vsource dc=value
-            vname (n+ n-) vsource pwl=[(t1,v1), (t2,v2), ...]
+            vname (n+ n-) vsource type="pwl" wave=[t1, v1, t2, v2, ...]
         """
         annot["name"]
         parts = annot["words"]
@@ -35,23 +40,13 @@ class InstanceVMixin:
             # Reconstruct the rest of the line
             rest_str = " ".join(rest)
 
-            # Check for PWL pattern (pwl(...) or pwl( broken by split)
-            if rest_str.lower().startswith("pwl(") or rest_str.lower().startswith("pwl "):
-                # Extract PWL content
-                pwl_content = rest_str
-                if pwl_content.lower().startswith("pwl("):
-                    pwl_content = pwl_content[4:]  # Remove "pwl("
-                elif pwl_content.lower().startswith("pwl"):
-                    pwl_content = pwl_content[3:].strip()
-                    if pwl_content.startswith("("):
-                        pwl_content = pwl_content[1:]
-
-                # Remove trailing )
-                if pwl_content.endswith(")"):
-                    pwl_content = pwl_content[:-1]
-
-                pwl_data = self.parse_pwl(pwl_content)
-                params.append(("pwl", pwl_data))
+            if re.match(r"pwl\b", rest_str, re.IGNORECASE):
+                coordinates = rest_str[3:].strip()
+                if coordinates.startswith("("):
+                    if not coordinates.endswith(")"):
+                        raise ConverterError(f"{annot['name']}: expected PWL(time value ...)")
+                    coordinates = coordinates[1:-1]
+                params.extend([("type", '"pwl"'), ("wave", self.parse_pwl(coordinates))])
             elif rest_str.lower().startswith("dc="):
                 params.append(("dc", self.format_value(rest_str[3:])))
             elif rest_str.lower().startswith("dc "):
@@ -78,37 +73,17 @@ class InstanceVMixin:
         return txt
 
     def parse_pwl(self, pwl_str):
-        """Parse PWL data string and return VACASK format."""
-        # The preprocessor removes spaces from inside parentheses,
-        # so input may be like: "0.0s0.0v1e-08s0.0v1.02e-08s1.3v"
-        # We need to split on 's' and 'v' unit suffixes.
-        #
-        # Pattern: number followed by 's' (time), then number followed by 'v' (voltage)
-        # The number pattern is: optional sign, digits, optional decimal, optional exponent
+        """Convert numeric time/value pairs to VAJAX's flat numeric waveform."""
+        tokens = re.split(r"[\s,]+", pwl_str.strip())
+        if len(tokens) < 2 or len(tokens) % 2:
+            raise ConverterError("PWL requires complete time/value pairs")
 
-        # First, try splitting by whitespace (in case spaces are preserved)
-        tokens = pwl_str.split()
-        if len(tokens) > 1:
-            # Spaces were preserved - original behavior
-            pwl_str_clean = re.sub(r"(\d+\.?\d*[eE]?[+-]?\d*)[sS]", r"\1", pwl_str)
-            pwl_str_clean = re.sub(r"(\d+\.?\d*[eE]?[+-]?\d*)[vV]", r"\1", pwl_str_clean)
-            tokens = pwl_str_clean.split()
-            pairs = []
-            for i in range(0, len(tokens), 2):
-                if i + 1 < len(tokens):
-                    pairs.append(f"({tokens[i]}, {tokens[i + 1]})")
-            return "[" + ", ".join(pairs) + "]"
-
-        # Spaces were removed - need to parse more carefully
-        # Pattern: time value pairs where time ends in 's' and value ends in 'v'
-        # Match pattern: (number)s(number)v repeated
-        number_pattern = r"[-+]?\d+\.?\d*(?:[eE][-+]?\d+)?"
-        pair_pattern = f"({number_pattern})[sS]({number_pattern})[vV]"
-
-        pairs = []
-        for match in re.finditer(pair_pattern, pwl_str):
-            t = match.group(1)
-            v = match.group(2)
-            pairs.append(f"({t}, {v})")
-
-        return "[" + ", ".join(pairs) + "]"
+        values = []
+        for i, token in enumerate(tokens):
+            # Accept both SPICE scales (10n, 500m) and explicit units (10ns, 500mV).
+            unit = "s" if i % 2 == 0 else "v"
+            value, ok = parse_spice_number(token.lower().removesuffix(unit))
+            if not ok or not math.isfinite(value):
+                raise ConverterError(f"Invalid numeric PWL coordinate: {token}")
+            values.append(value)
+        return str(values)

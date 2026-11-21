@@ -258,3 +258,38 @@ class TestConverterFromFixtures:
         assert output_file.exists()
         content = output_file.read_text()
         assert len(content) > 0
+
+
+def test_pwl_voltage_round_trip(tmp_path):
+    """Leave numeric coordinates intact through preprocessing and normal parsing."""
+    import ast
+
+    from vajax.netlist.parser import parse_netlist
+
+    deck = tmp_path / "wave.sp"
+    deck.write_text(
+        "Numeric inputs\n"
+        "VOne a 0 PWL(0 0 2e-9 1.25\n"
+        "+ 3e-9 -.2)\n"
+        "VTwo b 0 pwl (0s,0V,1ns,500mV,2ns,-2V)\n.end\n"
+    )
+    output = tmp_path / "wave.sim"
+    Converter().convert(str(deck), str(output))
+    inputs = {i.name: i for i in parse_netlist(output).top_instances}
+    for name, node, expected in [
+        ("vone", "a", [0, 0, 2e-9, 1.25, 3e-9, -0.2]),
+        ("vtwo", "b", [0, 0, 1e-9, 0.5, 2e-9, -2]),
+    ]:
+        assert inputs[name].terminals == [node, "0"]
+        assert inputs[name].params["type"].strip('"') == "pwl"
+        assert ast.literal_eval(inputs[name].params["wave"]) == expected
+
+
+@pytest.mark.parametrize("coords", ["0 0 1n", "", "0 0 1n invalid"])
+def test_invalid_pwl_voltage_reports_an_error(tmp_path, coords):
+    from vajax.netlist_converter.ng2vclib.exc import ConverterError
+
+    deck = tmp_path / "invalid.sp"
+    deck.write_text(f"Invalid input\nV1 a 0 PWL({coords})\n.end\n")
+    with pytest.raises(ConverterError, match="PWL"):
+        Converter().convert(str(deck), str(tmp_path / "invalid.sim"))
